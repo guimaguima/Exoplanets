@@ -59,11 +59,13 @@ planetas_teste <- planetas_teste %>%
 f_modelo <- as.formula(paste("koi_disposition ~", paste(preditores, collapse = " + ")))
 
 modelo_bayesiano <- stan_glm(
-  formula = f_modelo, 
-  data = planetas_treino, 
-  family = binomial(link = "logit"), 
-  chains = 4,                        
-  iter = 2000,                       
+  formula = f_modelo,
+  data = planetas_treino,
+  family = binomial(link = "logit"),
+  prior = normal(location = 0, scale = 2.5, autoscale = TRUE),
+  prior_intercept = normal(location = 0, scale = 5, autoscale = TRUE),
+  chains = 4,
+  iter = 2000,
   seed = 42,
   refresh = 500                      
 )
