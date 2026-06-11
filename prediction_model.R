@@ -1,11 +1,11 @@
-#remove.packages(c("rstan", "StanHeaders", "BH"))
-#install.packages("rstanarm")
-#install.packages("tidymodels")
-# install.packages(c("pROC", "caret", "tidymodels"))
 library(tidyverse)
 library(tidymodels)
 library(rstanarm)
 library(bayesplot)
+library(corrplot)
+library(HDInterval)
+library(tidybayes)
+library(ggplot2)
 library(pROC)
 library(caret)
 
@@ -13,117 +13,122 @@ color_scheme_set("mix-blue-red")
 
 planetas_raw <- read_csv('bayes/cumulative.csv')
 
-colunas_para_remover <- c(
-  'rowid', 'kepid', 'kepoi_name', 'kepler_name',
-  'koi_pdisposition', 'koi_score',
-  'koi_fpflag_nt', 'koi_fpflag_ss', 'koi_fpflag_co', 'koi_fpflag_ec',
-  'koi_tce_delivname'
+preditores_mod2 <- c(
+  'periodo_orbital_dias', 'parametro_impacto', 'duracao_transito_hrs', 
+  'profundidade_transito_ppm', 'raio_planetario_terra', 'temp_equilibrio_k', 
+  'snr_modelo', 'num_planetas_sistema', 
+  'temp_estrela_k', 'gravidade_estrela_log', 'raio_estrela_sol'
 )
 
-preditores <- c(
-  'koi_period', 'koi_time0bk', 'koi_impact', 'koi_duration', 
-  'koi_depth', 'koi_prad', 'koi_teq', 'koi_insol', 
-  'koi_model_snr', 'koi_tce_plnt_num', 'ra', 'dec', 'koi_kepmag', 
-  'koi_steff', 'koi_slogg', 'koi_srad', 
-  'koi_depth_snr_weighted'
-)
-
-
-planetas_processados <- planetas_raw %>%
-  select(-any_of(colunas_para_remover)) %>%
-  filter(koi_disposition %in% c("CONFIRMED", "FALSE POSITIVE", "CANDIDATE")) %>%
-  drop_na(any_of(preditores)) %>%
-  mutate(
-    koi_disposition = factor(koi_disposition, levels = c("FALSE POSITIVE", "CONFIRMED", "CANDIDATE")),
-    koi_depth_snr_weighted = koi_depth * koi_model_snr 
+planetas <- planetas_raw %>%
+  filter(koi_disposition %in% c("CONFIRMED", "FALSE POSITIVE")) %>%
+  rename(
+    periodo_orbital_dias = koi_period,
+    duracao_transito_hrs = koi_duration,
+    profundidade_transito_ppm = koi_depth,
+    raio_planetario_terra = koi_prad,
+    parametro_impacto = koi_impact,
+    temp_equilibrio_k = koi_teq,
+    snr_modelo = koi_model_snr,
+    num_planetas_sistema = koi_tce_plnt_num,
+    temp_estrela_k = koi_steff,
+    gravidade_estrela_log = koi_slogg,
+    raio_estrela_sol = koi_srad
   ) %>%
-  mutate(across(all_of(preditores), ~ as.numeric(scale(.))))
-
-
-dados_candidatos <- planetas_processados %>% filter(koi_disposition == "CANDIDATE")
-
-dados_modelagem <- planetas_processados %>% 
-  filter(koi_disposition != "CANDIDATE") %>%
-  mutate(koi_disposition = droplevels(koi_disposition))
+  drop_na(any_of(preditores_mod2)) %>%
+  mutate(koi_disposition = factor(koi_disposition, levels = c("FALSE POSITIVE", "CONFIRMED")))
 
 set.seed(42)
-split <- initial_split(dados_modelagem, prop = 0.70, strata = koi_disposition)
+split <- initial_split(planetas, prop = 0.70, strata = koi_disposition)
 dados_treino <- training(split)
 dados_teste  <- testing(split)
 
-f_modelo <- as.formula(paste("koi_disposition ~", paste(preditores, collapse = " + ")))
+f_modelo2 <- as.formula(paste("koi_disposition ~", paste(preditores_mod2, collapse = " + ")))
 
 set.seed(42)
-modelo_preditivo <- stan_glm(
-  formula = f_modelo,
+modelo_bayesiano_2 <- stan_glm(
+  formula = f_modelo2,
   data = dados_treino,
   family = binomial(link = "logit"),
   prior = student_t(df = 3, location = 0, scale = 2.5, autoscale = TRUE),
   prior_intercept = student_t(df = 3, location = 0, scale = 5, autoscale = TRUE),
   chains = 4,         
   cores = 4,          
-  iter = 2000,
+  iter = 4000,
   seed = 42,
   refresh = 500       
 )
 
+matriz_prob_treino <- posterior_epred(modelo_bayesiano_2)
+matriz_prob_teste <- posterior_epred(modelo_bayesiano_2, newdata = dados_teste)
 
-cat("\n--- Avaliando Modelo no Conjunto de Teste ---\n")
+calcular_moda_continua <- function(x) {
+  d <- density(x)
+  d$x[which.max(d$y)]
+}
 
-matriz_prob_teste <- posterior_epred(modelo_preditivo, newdata = dados_teste)
+probs_treino_media <- apply(matriz_prob_treino, 2, mean)
+probs_treino_mediana <- apply(matriz_prob_treino, 2, median)
+probs_treino_moda <- apply(matriz_prob_treino, 2, calcular_moda_continua)
+
 probs_teste_media <- apply(matriz_prob_teste, 2, mean)
+probs_teste_mediana <- apply(matriz_prob_teste, 2, median)
+probs_teste_moda <- apply(matriz_prob_teste, 2, calcular_moda_continua)
 
-roc_obj <- roc(response = dados_teste$koi_disposition, predictor = probs_teste_media, levels = c("FALSE POSITIVE", "CONFIRMED"))
+avaliar_estimador <- function(nome_estimador, prob_treino, prob_teste, y_treino, y_teste) {
+  
+  roc_treino <- roc(response = y_treino, predictor = prob_treino, levels = c("FALSE POSITIVE", "CONFIRMED"), quiet = TRUE)
+  coords_roc <- coords(roc_treino, "best", ret = c("threshold"), best.method = "youden")
+  corte_ideal <- coords_roc$threshold[1]
+  
+  roc_teste <- roc(response = y_teste, predictor = prob_teste, levels = c("FALSE POSITIVE", "CONFIRMED"), quiet = TRUE)
+  auc_teste <- as.numeric(auc(roc_teste))
+  
+  classificacao <- ifelse(prob_teste >= corte_ideal, "CONFIRMED", "FALSE POSITIVE")
+  classificacao <- factor(classificacao, levels = c("FALSE POSITIVE", "CONFIRMED"))
+  y_teste_fator <- factor(y_teste, levels = c("FALSE POSITIVE", "CONFIRMED"))
+  
+  cm <- confusionMatrix(classificacao, y_teste_fator, positive = "CONFIRMED")
+  
+  metricas <- data.frame(
+    Metodo = nome_estimador,
+    Threshold = round(corte_ideal, 4),
+    AUC_Teste = round(auc_teste, 4),
+    Acuracia = round(cm$overall["Accuracy"], 4),
+    Sensibilidade = round(cm$byClass["Sensitivity"], 4),
+    Especificidade = round(cm$byClass["Specificity"], 4),
+    F1_Score = round(cm$byClass["F1"], 4),
+    row.names = NULL
+  )
+  
+  list(metricas = metricas, matriz = cm$table, roc = roc_teste)
+}
 
-plot(roc_obj, main = "Curva ROC - Conjunto de Teste", col = "#1c73b8", lwd = 2)
-auc_val <- auc(roc_obj)
-legend("bottomright", legend = paste("AUC =", round(auc_val, 3)), col = "#1c73b8", lwd = 2)
+resultado_media <- avaliar_estimador("Média", probs_treino_media, probs_teste_media, dados_treino$koi_disposition, dados_teste$koi_disposition)
+resultado_mediana <- avaliar_estimador("Mediana", probs_treino_mediana, probs_teste_mediana, dados_treino$koi_disposition, dados_teste$koi_disposition)
+resultado_moda <- avaliar_estimador("Moda", probs_treino_moda, probs_teste_moda, dados_treino$koi_disposition, dados_teste$koi_disposition)
 
-corte_otimo_info <- coords(roc_obj, "best", ret = c("threshold", "specificity", "sensitivity"), best.method = "youden")
-corte_ideal <- corte_otimo_info$threshold[1]
+tabela_comparativa <- bind_rows(resultado_media$metricas, resultado_mediana$metricas, resultado_moda$metricas)
+print(tabela_comparativa %>% as.data.frame())
 
-cat(paste("\nCorte Ideal encontrado pela curva ROC:", round(corte_ideal, 4), "\n"))
+cat("\n--- Matriz de Confusão: Média ---\n")
+print(resultado_media$matriz)
 
-predicoes_finais_teste <- ifelse(probs_teste_media >= corte_ideal, "CONFIRMED", "FALSE POSITIVE")
-predicoes_finais_teste <- factor(predicoes_finais_teste, levels = c("FALSE POSITIVE", "CONFIRMED"))
+cat("\n--- Matriz de Confusão: Mediana ---\n")
+print(resultado_mediana$matriz)
 
-matriz_confusao <- confusionMatrix(predicoes_finais_teste, dados_teste$koi_disposition, positive = "CONFIRMED")
-print(matriz_confusao)
+cat("\n--- Matriz de Confusão: Moda ---\n")
+print(resultado_moda$matriz)
 
+plot(resultado_media$roc, col = "#1c73b8", lwd = 2, main = "Comparação ROC - Conjunto de Teste")
+plot(resultado_mediana$roc, col = "#d95f02", lwd = 2, add = TRUE, lty = 2)
+plot(resultado_moda$roc, col = "#1b9e77", lwd = 2, add = TRUE, lty = 3)
 
-cat("\n--- Realizando predições nos exoplanetas candidatos ---\n")
-
-matriz_prob_cand <- posterior_epred(modelo_preditivo, newdata = dados_candidatos)
-
-resultados_candidatos <- dados_candidatos %>%
-  mutate(
-    prob_media = apply(matriz_prob_cand, 2, mean),
-    hpd_inferior = apply(matriz_prob_cand, 2, quantile, probs = 0.025),
-    hpd_superior = apply(matriz_prob_cand, 2, quantile, probs = 0.975),
-    
-    classificacao_bayesiana = case_when(
-      hpd_inferior >= corte_ideal ~ "CONFIRMADO (Alta Certeza)",
-      hpd_superior < corte_ideal ~ "FALSO POSITIVO (Alta Certeza)",
-      TRUE ~ "INCERTO (Abstenção)"
-    )
-  ) %>%
-  select(koi_disposition, prob_media, hpd_inferior, hpd_superior, classificacao_bayesiana, everything())
-
-cat("\nResumo da Classificação dos Candidatos com Corte de", round(corte_ideal, 3), ":\n")
-print(table(resultados_candidatos$classificacao_bayesiana))
-
-resultados_plot <- resultados_candidatos %>% arrange(prob_media) %>% mutate(id = row_number())
-
-ggplot(resultados_plot, aes(x = id, y = prob_media, color = classificacao_bayesiana)) +
-  geom_point(alpha = 0.6, size = 1) +
-  geom_linerange(aes(ymin = hpd_inferior, ymax = hpd_superior), alpha = 0.2) +
-  geom_hline(yintercept = corte_ideal, linetype = "dashed", color = "black") +
-  theme_minimal() +
-  labs(
-    title = "Classificação Bayesiana de Exoplanetas Candidatos",
-    subtitle = paste("Intervalo HPD 95% | Linha de Corte Otimizada (ROC):", round(corte_ideal, 3)),
-    x = "Candidatos (Ordenados por Probabilidade)",
-    y = "Probabilidade de ser Confirmado",
-    color = "Classificação"
-  ) +
-  theme(legend.position = "bottom")
+legend("bottomright", 
+       legend = c(
+         paste("Média (AUC:", round(auc(resultado_media$roc), 3), ")"),
+         paste("Mediana (AUC:", round(auc(resultado_mediana$roc), 3), ")"),
+         paste("Moda (AUC:", round(auc(resultado_moda$roc), 3), ")")
+       ), 
+       col = c("#1c73b8", "#d95f02", "#1b9e77"), 
+       lwd = 2, lty = c(1, 2, 3))
