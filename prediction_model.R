@@ -11,7 +11,7 @@ library(caret)
 
 color_scheme_set("mix-blue-red")
 
-planetas_raw <- read_csv('bayes/cumulative.csv')
+planetas_raw <- read_csv('data/cumulative.csv')
 
 preditores_mod2 <- c(
   'periodo_orbital_dias', 'parametro_impacto', 'duracao_transito_hrs', 
@@ -59,6 +59,91 @@ modelo_bayesiano_2 <- stan_glm(
   refresh = 500       
 )
 
+# Resumo posteriori
+mcmc_trace(
+  modelo_bayesiano_2, 
+  pars = preditores_mod2
+) + ggplot2::ggtitle("Trace Plots de Preditores Chave")
+
+N_por_cadeia <- 1000 
+limite_acf <- 1.96 / sqrt(N_por_cadeia)
+
+mcmc_acf(
+  modelo_bayesiano_2, 
+  pars = preditores_mod2
+) + 
+  ggplot2::geom_hline(
+    yintercept = c(-limite_acf, limite_acf), 
+    linetype = "dashed", 
+    color = "#1c73b8", 
+    alpha = 0.7,
+    linewidth = 0.8
+  ) +
+  ggplot2::ggtitle("Função de Autocorrelação (ACF)", subtitle = "Envelope pontilhado azul indica o Intervalo de Confiança de 95% para ruído branco")
+cat("\n--- Sumário e Intervalos ---\n")
+
+cat("\n--- Intervalos de Maior Densidade a Posteriori (HPD - 95%) ---\n")
+
+matriz_amostras <- as.matrix(modelo_bayesiano_2)[, preditores_mod2]
+
+tabela_hpd <- hdi(matriz_amostras, credMass = 0.95)
+
+modelo_bayesiano_2 %>%
+  gather_draws(!!!syms(preditores_mod2)) %>%
+  ggplot(aes(y = .variable, x = .value)) +
+  stat_halfeye(.width = 0.95, point_interval = mode_hdi, 
+               fill = "#1c73b8", alpha = 0.6) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  theme_minimal() +
+  labs(
+    title = "Posterior: Intervalos HPD (95%)",
+    subtitle = "Linha vermelha no zero indica efeito nulo. Pontos representam a Moda (MAP).",
+    x = "Estimativa do Coeficiente",
+    y = "Preditores"
+  )
+
+modelo_bayesiano_2 %>%
+  gather_draws(!!!syms(preditores_mod2)) %>%
+  ggplot(aes(y = .variable, x = .value)) +
+  stat_halfeye(.width = 0.95, point_interval = mode_hdi, 
+               fill = "#1c73b8", alpha = 0.6) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  coord_cartesian(xlim = c(-0.04, 0.04)) +
+  theme_minimal() +
+  labs(
+    title = "Posterior: Efeitos Menores (Zoom HPD 95%)",
+    subtitle = "Variáveis com grandes efeitos foram cortadas visualmente para permitir a leitura",
+    x = "Estimativa do Coeficiente (Zoom)",
+    y = "Preditores"
+  )
+
+print(summary(modelo_bayesiano_2, digits = 3))
+
+preditores_mod2_intercept <- c(preditores_mod2, "(Intercept)")
+tabela_odds_ratio <- modelo_bayesiano_2 %>%
+  gather_draws(!!!syms(preditores_mod2_intercept)) %>%
+  
+  mode_hdi(.width = 0.95) %>% 
+  
+  mutate(
+    Odds_Ratio = exp(.value),
+    HPD_Inferior_OR = exp(.lower),
+    HPD_Superior_OR = exp(.upper)
+  ) %>%
+  
+  select(.variable, Odds_Ratio, HPD_Inferior_OR, HPD_Superior_OR) %>%
+  rename(Preditores = .variable) %>%
+  arrange(desc(Odds_Ratio)) %>%
+  mutate(
+    across(
+      where(is.numeric),
+      ~ format(round(., 4), scientific = FALSE)
+    )
+  )
+
+print(as.data.frame(tabela_odds_ratio))
+
+# Teste
 matriz_prob_treino <- posterior_epred(modelo_bayesiano_2)
 matriz_prob_teste <- posterior_epred(modelo_bayesiano_2, newdata = dados_teste)
 
