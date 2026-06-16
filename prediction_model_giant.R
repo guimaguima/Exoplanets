@@ -13,10 +13,10 @@ color_scheme_set("mix-blue-red")
 
 planetas_raw <- read_csv('data/cumulative.csv')
 
-preditores_mod2 <- c(
+preditores_mod1 <- c(
   'periodo_orbital_dias', 'parametro_impacto', 'duracao_transito_hrs', 
-  'profundidade_transito_ppm', 'raio_planetario_terra', 'temp_equilibrio_k', 
-  'snr_modelo', 'num_planetas_sistema', 
+  'profundidade_transito_ppm', 'raio_planetario_terra', 'temp_equilibrio_k', 'insolacao', 
+  'snr_modelo', 'num_planetas_sistema', 'ascensao_reta', 'declinacao', 'magnitude_kepler', 
   'temp_estrela_k', 'gravidade_estrela_log', 'raio_estrela_sol'
 )
 
@@ -24,6 +24,7 @@ planetas <- planetas_raw %>%
   filter(koi_disposition %in% c("CONFIRMED", "FALSE POSITIVE")) %>%
   rename(
     periodo_orbital_dias = koi_period,
+    insolacao = koi_insol,
     duracao_transito_hrs = koi_duration,
     profundidade_transito_ppm = koi_depth,
     raio_planetario_terra = koi_prad,
@@ -31,11 +32,14 @@ planetas <- planetas_raw %>%
     temp_equilibrio_k = koi_teq,
     snr_modelo = koi_model_snr,
     num_planetas_sistema = koi_tce_plnt_num,
+    magnitude_kepler = koi_kepmag,
     temp_estrela_k = koi_steff,
     gravidade_estrela_log = koi_slogg,
-    raio_estrela_sol = koi_srad
+    raio_estrela_sol = koi_srad,
+    ascensao_reta = ra,
+    declinacao = dec
   ) %>%
-  drop_na(any_of(preditores_mod2)) %>%
+  drop_na(any_of(preditores_mod1)) %>%
   mutate(koi_disposition = factor(koi_disposition, levels = c("FALSE POSITIVE", "CONFIRMED")))
 
 set.seed(42)
@@ -43,11 +47,11 @@ split <- initial_split(planetas, prop = 0.70, strata = koi_disposition)
 dados_treino <- training(split)
 dados_teste  <- testing(split)
 
-f_modelo2 <- as.formula(paste("koi_disposition ~", paste(preditores_mod2, collapse = " + ")))
+f_modelo1 <- as.formula(paste("koi_disposition ~", paste(preditores_mod1, collapse = " + ")))
 
 set.seed(42)
-modelo_bayesiano_2 <- stan_glm(
-  formula = f_modelo2,
+modelo_bayesiano_1 <- stan_glm(
+  formula = f_modelo1,
   data = dados_treino,
   family = binomial(link = "logit"),
   prior = student_t(df = 3, location = 0, scale = 2.5, autoscale = TRUE),
@@ -61,16 +65,16 @@ modelo_bayesiano_2 <- stan_glm(
 
 # Resumo posteriori
 mcmc_trace(
-  modelo_bayesiano_2, 
-  pars = preditores_mod2
+  modelo_bayesiano_1, 
+  pars = preditores_mod1
 ) + ggplot2::ggtitle("Trace Plots de Preditores Chave")
 
 N_por_cadeia <- 1000 
 limite_acf <- 1.96 / sqrt(N_por_cadeia)
 
 mcmc_acf(
-  modelo_bayesiano_2, 
-  pars = preditores_mod2
+  modelo_bayesiano_1, 
+  pars = preditores_mod1
 ) + 
   ggplot2::geom_hline(
     yintercept = c(-limite_acf, limite_acf), 
@@ -84,12 +88,12 @@ cat("\n--- Sumário e Intervalos ---\n")
 
 cat("\n--- Intervalos de Maior Densidade a Posteriori (HPD - 95%) ---\n")
 
-matriz_amostras <- as.matrix(modelo_bayesiano_2)[, preditores_mod2]
+matriz_amostras <- as.matrix(modelo_bayesiano_1)[, preditores_mod1]
 
 tabela_hpd <- hdi(matriz_amostras, credMass = 0.95)
 
-modelo_bayesiano_2 %>%
-  gather_draws(!!!syms(preditores_mod2)) %>%
+modelo_bayesiano_1 %>%
+  gather_draws(!!!syms(preditores_mod1)) %>%
   ggplot(aes(y = .variable, x = .value)) +
   stat_halfeye(.width = 0.95, point_interval = mode_hdi, 
                fill = "#1c73b8", alpha = 0.6) +
@@ -102,8 +106,8 @@ modelo_bayesiano_2 %>%
     y = "Preditores"
   )
 
-modelo_bayesiano_2 %>%
-  gather_draws(!!!syms(preditores_mod2)) %>%
+modelo_bayesiano_1 %>%
+  gather_draws(!!!syms(preditores_mod1)) %>%
   ggplot(aes(y = .variable, x = .value)) +
   stat_halfeye(.width = 0.95, point_interval = mode_hdi, 
                fill = "#1c73b8", alpha = 0.6) +
@@ -117,11 +121,11 @@ modelo_bayesiano_2 %>%
     y = "Preditores"
   )
 
-print(summary(modelo_bayesiano_2, digits = 3))
+print(summary(modelo_bayesiano_1, digits = 3))
 
-preditores_mod2_intercept <- c(preditores_mod2, "(Intercept)")
-tabela_odds_ratio <- modelo_bayesiano_2 %>%
-  gather_draws(!!!syms(preditores_mod2_intercept)) %>%
+preditores_mod1_intercept <- c(preditores_mod1, "(Intercept)")
+tabela_odds_ratio <- modelo_bayesiano_1 %>%
+  gather_draws(!!!syms(preditores_mod1_intercept)) %>%
   
   mode_hdi(.width = 0.95) %>% 
   
@@ -144,8 +148,8 @@ tabela_odds_ratio <- modelo_bayesiano_2 %>%
 print(as.data.frame(tabela_odds_ratio))
 
 # Teste
-matriz_prob_treino <- posterior_epred(modelo_bayesiano_2)
-matriz_prob_teste <- posterior_epred(modelo_bayesiano_2, newdata = dados_teste)
+matriz_prob_treino <- posterior_epred(modelo_bayesiano_1)
+matriz_prob_teste <- posterior_epred(modelo_bayesiano_1, newdata = dados_teste)
 
 calcular_moda_continua <- function(x) {
   d <- density(x)
@@ -217,6 +221,7 @@ legend("bottomright",
        ), 
        col = c("#1c73b8", "#d95f02", "#1b9e77"), 
        lwd = 2, lty = c(1, 2, 3))
+
 
 cat("\n--- Z|Y preditiva ---\n")
 calcular_moda_discreta <- function(x) {
